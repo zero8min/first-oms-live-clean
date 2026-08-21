@@ -480,15 +480,37 @@ async function sendSolapiSms(to,text,tenantCode){
 }
 
 
+function cleanSolapiCredential(v){
+ const s=String(v||'').trim();
+ if(!s)return '';
+ // 마스킹 문자(•, *, ● 등)나 비 ASCII 문자가 섞인 값은 실제 인증키가 아니다.
+ if(/[•●·…*]/.test(s)||/[^\x20-\x7E]/.test(s))return '';
+ return s;
+}
+function preservedSolapiConfig(tenantCode){
+ if(!tenantCode)return {};
+ const names=['solapi-settings-preserved-v734.json','solapi-settings-preserved.json','solapi-settings-backup.json'];
+ for(const n of names){
+  const o=readJsonObject(tenantFile(tenantCode,n),{});
+  if(cleanSolapiCredential(o.apiKey)&&cleanSolapiCredential(o.apiSecret))return o;
+ }
+ // 예전 단일거래처 버전의 integrations.json도 마지막 복구 후보로 사용한다.
+ const legacy=readIntegrations();
+ if(cleanSolapiCredential(legacy.apiKey)&&cleanSolapiCredential(legacy.apiSecret))return legacy;
+ return {};
+}
 function solapiConfig(tenantCode){
  const f=tenantCode?tenantReadIntegrations(tenantCode):readIntegrations();
- if(tenantCode)return {apiKey:f.apiKey||'',apiSecret:f.apiSecret||'',sender:onlyDigits(f.sender),pfId:f.pfId||'',templateId:f.templateId||''};
+ const preserved=tenantCode?preservedSolapiConfig(tenantCode):{};
+ const apiKey=cleanSolapiCredential(f.apiKey)||cleanSolapiCredential(preserved.apiKey)||cleanSolapiCredential(process.env.SOLAPI_API_KEY);
+ const apiSecret=cleanSolapiCredential(f.apiSecret)||cleanSolapiCredential(preserved.apiSecret)||cleanSolapiCredential(process.env.SOLAPI_API_SECRET);
+ const sender=onlyDigits(f.sender||preserved.sender||process.env.SOLAPI_SENDER);
  return {
-  apiKey:f.apiKey||process.env.SOLAPI_API_KEY||'',
-  apiSecret:f.apiSecret||process.env.SOLAPI_API_SECRET||'',
-  sender:onlyDigits(f.sender||process.env.SOLAPI_SENDER),
-  pfId:f.pfId||process.env.SOLAPI_KAKAO_PF_ID||process.env.SOLAPI_PF_ID||'',
-  templateId:f.templateId||process.env.SOLAPI_KAKAO_TEMPLATE_ID||process.env.SOLAPI_TEMPLATE_ID||''
+  apiKey,
+  apiSecret,
+  sender,
+  pfId:String(f.pfId||preserved.pfId||process.env.SOLAPI_KAKAO_PF_ID||process.env.SOLAPI_PF_ID||'').trim(),
+  templateId:String(f.templateId||preserved.templateId||process.env.SOLAPI_KAKAO_TEMPLATE_ID||process.env.SOLAPI_TEMPLATE_ID||'').trim()
  }
 }
 async function sendSolapiKakao(to,variables,text,tenantCode){
@@ -761,13 +783,20 @@ const server=http.createServer((req,res)=>{
 
  if(u.pathname==='/api/solapi/config'&&req.method==='GET'){
   const cfg=solapiConfig(tenantCode);
-  return json(res,200,{ok:true,configured:!!(cfg.apiKey&&cfg.apiSecret&&cfg.sender),apiKey:cfg.apiKey?cfg.apiKey.slice(0,4)+'••••••':'',sender:cfg.sender||'',pfId:cfg.pfId||'',templateId:cfg.templateId||'',hasSecret:!!cfg.apiSecret});
+  return json(res,200,{ok:true,configured:!!(cfg.apiKey&&cfg.apiSecret&&cfg.sender),apiKey:'',apiKeyMasked:cfg.apiKey?cfg.apiKey.slice(0,4)+'••••••':'',sender:cfg.sender||'',pfId:cfg.pfId||'',templateId:cfg.templateId||'',hasApiKey:!!cfg.apiKey,hasSecret:!!cfg.apiSecret});
  }
  if(u.pathname==='/api/solapi/config'&&req.method==='POST'){
   return readBody(req).then(body=>{try{
-   const d=JSON.parse(body||'{}'), old=tenantReadIntegrations(tenantCode);
-   const next={apiKey:String(d.apiKey||old.apiKey||'').trim(),apiSecret:String(d.apiSecret||old.apiSecret||'').trim(),sender:onlyDigits(d.sender||old.sender),pfId:String(d.pfId||old.pfId||'').trim(),templateId:String(d.templateId||old.templateId||'').trim()};
-   if(!next.apiKey||!next.apiSecret||!next.sender)return json(res,400,{ok:false,error:'API Key, API Secret, 승인 발신번호를 모두 입력해 주세요.'});
+   const d=JSON.parse(body||'{}'), old=tenantReadIntegrations(tenantCode), effective=solapiConfig(tenantCode);
+   const incomingKey=cleanSolapiCredential(d.apiKey), incomingSecret=cleanSolapiCredential(d.apiSecret);
+   const next={
+    apiKey:incomingKey||cleanSolapiCredential(old.apiKey)||effective.apiKey||'',
+    apiSecret:incomingSecret||cleanSolapiCredential(old.apiSecret)||effective.apiSecret||'',
+    sender:onlyDigits(d.sender||old.sender||effective.sender),
+    pfId:String(d.pfId||old.pfId||effective.pfId||'').trim(),
+    templateId:String(d.templateId||old.templateId||effective.templateId||'').trim()
+   };
+   if(!next.apiKey||!next.apiSecret||!next.sender)return json(res,400,{ok:false,error:'정상 SOLAPI API Key·Secret·승인 발신번호를 확인해 주세요. 마스킹된 점(••••)은 저장되지 않습니다.'});
    tenantSaveIntegrations(tenantCode,next);return json(res,200,{ok:true,configured:true,sender:next.sender});
   }catch(e){return json(res,400,{ok:false,error:e.message})}});
  }
@@ -991,7 +1020,8 @@ const server=http.createServer((req,res)=>{
   return req.on('end',()=>{try{
    const c=JSON.parse(body||'{}');
    if(!c.name||!c.nickname||!c.phone)return json(res,400,{error:'필수값 누락'});
-   let list=tenantReadCustomers(tenantCode),i=list.findIndex(x=>x.nickname===c.nickname||x.phone===c.phone);
+   let list=tenantReadCustomers(tenantCode),i=list.findIndex(x=>String(x.id||'')===String(c.id||''));
+   if(i<0)i=list.findIndex(x=>String(x.nickname||x.nick||'')===String(c.nickname||c.nick||'')||onlyDigits(x.phone)===onlyDigits(c.phone));
    const next={id:c.id||Date.now().toString(36),joinedAt:c.joinedAt||new Date().toLocaleString('ko-KR'),source:c.source||'가입폼',...c};
    if(i>=0)list[i]={...list[i],...next};else list.push(next);
    tenantWriteCustomers(tenantCode,list);const st=tenantReadState(tenantCode);st.customers=list;atomicWrite(tenantFile(tenantCode,'server-state.json'),JSON.stringify({...st,customers:list,updatedAt:new Date().toISOString()},null,2));json(res,200,{...next,totalCustomers:list.length})
