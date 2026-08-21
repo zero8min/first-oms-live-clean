@@ -1,0 +1,20 @@
+/* v7.56 usability fixes */
+#customersTable .scroll{overflow-x:auto!important;overflow-y:visible!important;max-width:100%!important}
+#customersTable table{width:100%!important;min-width:980px!important;table-layout:fixed!important}
+#customersTable th,#customersTable td{white-space:normal!important;word-break:break-word!important;overflow-wrap:anywhere!important}
+#customersTable th:nth-child(1),#customersTable td:nth-child(1){width:42px!important}
+#customersTable .v756-manage-head,#customersTable .v756-manage-cell{width:150px!important;min-width:150px!important;background:#20242b!important;color:#fff!important;position:sticky!important;left:42px!important;z-index:5!important}
+#customersTable .v756-manage-cell .btn{display:inline-block!important;margin:2px!important;padding:7px 10px!important}
+#customersTable th:last-child,#customersTable td:last-child{position:static!important;background:inherit!important;box-shadow:none!important}
+#receiptCards .v756-detail-head,#receiptCards .v756-detail-cell{position:sticky!important;left:42px!important;z-index:5!important;background:#20242b!important;color:#fff!important;min-width:140px!important}
+#receiptCards .v756-detail-btn{background:#f1b777!important;color:#25180c!important;border:0!important;font-weight:900!important;white-space:nowrap!important}
+.v756-ship-toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.v756-ship-table{width:100%;min-width:1050px;border-collapse:collapse}
+.v756-ship-table th,.v756-ship-table td{padding:10px 8px;vertical-align:middle}
+.v756-ship-table .v756-items{line-height:1.65}
+.v756-ship-table td:nth-child(1),.v756-ship-table th:nth-child(1){width:45px;text-align:center}
+.v756-ship-table td:nth-child(2),.v756-ship-table th:nth-child(2){width:125px}
+.v756-ship-table td:nth-child(3),.v756-ship-table th:nth-child(3){width:120px}
+.v756-ship-table td:nth-child(6),.v756-ship-table th:nth-child(6){width:105px;text-align:right}
+.v756-ship-table td:nth-child(7),.v756-ship-table th:nth-child(7){width:135px}
+.v756-ship-table td:nth-child(8),.v756-ship-table th:nth-child(8){width:155px}
