@@ -1,0 +1,12 @@
+{
+  "name": "first-oms-ddaenglive-v750",
+  "version": "7.50.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "verify": "node verify-v750.js"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}
