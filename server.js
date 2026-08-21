@@ -458,9 +458,13 @@ function readBody(req,max=1024*1024){
 }
 function onlyDigits(v){return String(v||'').replace(/[^0-9]/g,'')}
 function solapiAuth(apiKey,apiSecret){
+ // 최종 방어선: HTTP Authorization 헤더에는 ASCII 실제 키만 허용한다.
+ // 마스킹 문자(• 등)가 들어가면 Node fetch가 ByteString 오류를 내므로 헤더 생성 전에 차단한다.
+ const safeKey=cleanSolapiCredential(apiKey),safeSecret=cleanSolapiCredential(apiSecret);
+ if(!safeKey||!safeSecret)throw new Error('SOLAPI 실제 API Key/Secret을 확인해 주세요. 마스킹된 값(••••••)은 사용할 수 없습니다.');
  const date=new Date().toISOString(),salt=crypto.randomBytes(16).toString('hex');
- const signature=crypto.createHmac('sha256',apiSecret).update(date+salt).digest('hex');
- return `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${salt}, signature=${signature}`
+ const signature=crypto.createHmac('sha256',safeSecret).update(date+salt).digest('hex');
+ return `HMAC-SHA256 apiKey=${safeKey}, date=${date}, salt=${salt}, signature=${signature}`
 }
 async function sendSolapiSms(to,text,tenantCode){
  const cfg=solapiConfig(tenantCode),apiKey=cfg.apiKey,apiSecret=cfg.apiSecret,sender=cfg.sender;
@@ -487,31 +491,61 @@ function cleanSolapiCredential(v){
  if(/[•●·…*]/.test(s)||/[^\x20-\x7E]/.test(s))return '';
  return s;
 }
-function preservedSolapiConfig(tenantCode){
- if(!tenantCode)return {};
- const names=['solapi-settings-preserved-v734.json','solapi-settings-preserved.json','solapi-settings-backup.json'];
- for(const n of names){
-  const o=readJsonObject(tenantFile(tenantCode,n),{});
-  if(cleanSolapiCredential(o.apiKey)&&cleanSolapiCredential(o.apiSecret))return o;
+function solapiCandidateFiles(tenantCode){
+ const out=[];
+ const add=f=>{try{if(f&&fs.existsSync(f)&&!out.includes(f))out.push(f)}catch(e){}};
+ if(tenantCode){
+  const td=tenantDir(tenantCode);
+  ['solapi-settings.json','solapi-settings-preserved-v734.json','solapi-settings-preserved.json','solapi-settings-backup.json','integrations.json','settings.json'].forEach(n=>add(path.join(td,n)));
+  try{for(const n of fs.readdirSync(td)){if(/solapi|integration/i.test(n)&&/\.json$/i.test(n))add(path.join(td,n))}}catch(e){}
+  try{const bd=path.join(td,'backups');for(const n of fs.readdirSync(bd)){if(/solapi|integration/i.test(n)&&/\.json$/i.test(n))add(path.join(bd,n))}}catch(e){}
  }
- // 예전 단일거래처 버전의 integrations.json도 마지막 복구 후보로 사용한다.
- const legacy=readIntegrations();
- if(cleanSolapiCredential(legacy.apiKey)&&cleanSolapiCredential(legacy.apiSecret))return legacy;
+ // 예전 단일거래처/구버전 데이터 위치도 모두 복구 후보로 검색한다.
+ [INTEGRATIONS,path.join(DATA_ROOT,'solapi-settings.json'),path.join(DATA_ROOT,'integrations.json'),path.join(DATA_ROOT,'solapi-settings-preserved-v734.json'),path.join(DATA_ROOT,'solapi-settings-preserved.json'),path.join(DATA_ROOT,'solapi-settings-backup.json')].forEach(add);
+ try{for(const n of fs.readdirSync(DATA_ROOT)){if(/solapi|integration/i.test(n)&&/\.json$/i.test(n))add(path.join(DATA_ROOT,n))}}catch(e){}
+ return out;
+}
+function normalizeSolapiObject(o){
+ if(!o||typeof o!=='object')return {};
+ // 일부 백업은 settings/solapi/integrations 아래에 중첩되어 있을 수 있다.
+ const candidates=[o,o.solapi,o.settings?.solapi,o.integrations,o.settings?.integrations].filter(Boolean);
+ for(const c of candidates){
+  const apiKey=cleanSolapiCredential(c.apiKey||c.key||c.api_key);
+  const apiSecret=cleanSolapiCredential(c.apiSecret||c.secret||c.api_secret);
+  const sender=onlyDigits(c.sender||c.from||c.senderNumber||c.sender_number);
+  if(apiKey&&apiSecret)return {apiKey,apiSecret,sender,pfId:String(c.pfId||c.pf_id||'').trim(),templateId:String(c.templateId||c.template_id||'').trim()};
+ }
+ return {};
+}
+function preservedSolapiConfig(tenantCode){
+ for(const f of solapiCandidateFiles(tenantCode)){
+  const o=readJsonObject(f,{}),n=normalizeSolapiObject(o);
+  if(n.apiKey&&n.apiSecret)return {...n,__source:f};
+ }
  return {};
 }
 function solapiConfig(tenantCode){
  const f=tenantCode?tenantReadIntegrations(tenantCode):readIntegrations();
- const preserved=tenantCode?preservedSolapiConfig(tenantCode):{};
- const apiKey=cleanSolapiCredential(f.apiKey)||cleanSolapiCredential(preserved.apiKey)||cleanSolapiCredential(process.env.SOLAPI_API_KEY);
- const apiSecret=cleanSolapiCredential(f.apiSecret)||cleanSolapiCredential(preserved.apiSecret)||cleanSolapiCredential(process.env.SOLAPI_API_SECRET);
- const sender=onlyDigits(f.sender||preserved.sender||process.env.SOLAPI_SENDER);
+ const current=normalizeSolapiObject(f);
+ const preserved=tenantCode?preservedSolapiConfig(tenantCode):preservedSolapiConfig(null);
+ const envKey=cleanSolapiCredential(process.env.SOLAPI_API_KEY),envSecret=cleanSolapiCredential(process.env.SOLAPI_API_SECRET);
+ const apiKey=current.apiKey||preserved.apiKey||envKey;
+ const apiSecret=current.apiSecret||preserved.apiSecret||envSecret;
+ const sender=onlyDigits(current.sender||preserved.sender||process.env.SOLAPI_SENDER);
  return {
-  apiKey,
-  apiSecret,
-  sender,
-  pfId:String(f.pfId||preserved.pfId||process.env.SOLAPI_KAKAO_PF_ID||process.env.SOLAPI_PF_ID||'').trim(),
-  templateId:String(f.templateId||preserved.templateId||process.env.SOLAPI_KAKAO_TEMPLATE_ID||process.env.SOLAPI_TEMPLATE_ID||'').trim()
+  apiKey,apiSecret,sender,
+  pfId:String(current.pfId||preserved.pfId||process.env.SOLAPI_KAKAO_PF_ID||process.env.SOLAPI_PF_ID||'').trim(),
+  templateId:String(current.templateId||preserved.templateId||process.env.SOLAPI_KAKAO_TEMPLATE_ID||process.env.SOLAPI_TEMPLATE_ID||'').trim(),
+  __source: current.apiKey?'tenant':(preserved.apiKey?'backup':(envKey?'environment':'missing'))
  }
+}
+function repairSolapiConfig(tenantCode){
+ try{
+  const cfg=solapiConfig(tenantCode);if(!tenantCode||!cfg.apiKey||!cfg.apiSecret)return cfg;
+  const old=tenantReadIntegrations(tenantCode),oldKey=cleanSolapiCredential(old.apiKey),oldSecret=cleanSolapiCredential(old.apiSecret);
+  if(!oldKey||!oldSecret){tenantSaveIntegrations(tenantCode,{...old,apiKey:cfg.apiKey,apiSecret:cfg.apiSecret,sender:onlyDigits(old.sender||cfg.sender),pfId:old.pfId||cfg.pfId||'',templateId:old.templateId||cfg.templateId||'',repairedAt:new Date().toISOString()})}
+  return cfg;
+ }catch(e){return solapiConfig(tenantCode)}
 }
 async function sendSolapiKakao(to,variables,text,tenantCode){
  const cfg=solapiConfig(tenantCode);
@@ -782,8 +816,13 @@ const server=http.createServer((req,res)=>{
  }
 
  if(u.pathname==='/api/solapi/config'&&req.method==='GET'){
-  const cfg=solapiConfig(tenantCode);
+  const cfg=repairSolapiConfig(tenantCode);
   return json(res,200,{ok:true,configured:!!(cfg.apiKey&&cfg.apiSecret&&cfg.sender),apiKey:'',apiKeyMasked:cfg.apiKey?cfg.apiKey.slice(0,4)+'••••••':'',sender:cfg.sender||'',pfId:cfg.pfId||'',templateId:cfg.templateId||'',hasApiKey:!!cfg.apiKey,hasSecret:!!cfg.apiSecret});
+ }
+
+ if(u.pathname==='/api/solapi/diagnose'&&req.method==='GET'){
+  const cfg=repairSolapiConfig(tenantCode);
+  return json(res,200,{ok:true,configured:!!(cfg.apiKey&&cfg.apiSecret&&cfg.sender),source:cfg.__source||'unknown',apiKeyPrefix:cfg.apiKey?cfg.apiKey.slice(0,4):'',sender:cfg.sender||'',asciiKey:!!(cfg.apiKey&&cleanSolapiCredential(cfg.apiKey)),asciiSecret:!!(cfg.apiSecret&&cleanSolapiCredential(cfg.apiSecret))});
  }
  if(u.pathname==='/api/solapi/config'&&req.method==='POST'){
   return readBody(req).then(body=>{try{
