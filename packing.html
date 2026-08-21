@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>땡라이브 택배팀 포장</title>
+<title>땡라이브 택배팀 포장 v7.50</title>
 <script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <style>
 *{box-sizing:border-box}html{background:#f5f5f7}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans KR",sans-serif;color:#171717;background:#f5f5f7;overflow-anchor:none}.wrap{max-width:720px;margin:auto;padding:14px}.card{background:#fff;border-radius:22px;padding:20px;box-shadow:0 8px 28px #00000012}.top{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:16px}.worker{font-size:18px;font-weight:900}.change{border:0;background:#ececf1;padding:9px 12px;border-radius:12px;font-weight:800}.job{font-size:30px;font-weight:950;letter-spacing:-1px}.count{margin:14px 0;background:#101010;color:white;padding:16px 18px;border-radius:18px;font-size:26px;font-weight:950;text-align:center}.items{margin-top:8px}.item{display:grid;grid-template-columns:1fr auto;gap:12px;padding:15px 3px;border-bottom:1px solid #eee;font-size:18px}.item .name{font-weight:850}.item .qty{font-size:22px;font-weight:950}.service{background:#eaf7ff;color:#075985;border-radius:14px;padding:12px 14px;margin-top:10px;font-weight:900}.btn{width:100%;border:0;border-radius:17px;padding:18px;font-size:20px;font-weight:950;margin-top:16px}.primary{background:#171717;color:white}.good{background:#16723a;color:white}.muted{background:#ececf1;color:#222}.scan-screen{display:none;text-align:center}.scan-screen.show{display:block}.scan-title{font-size:34px;font-weight:950;margin:8px 0}.scan-sub{font-size:18px;line-height:1.6}.camera{margin:14px 0;background:#000;border-radius:18px;overflow:hidden;min-height:260px;display:flex;align-items:center;justify-content:center}.camera video{width:100%;max-height:420px}.scan-line{position:relative}.notice{padding:15px;border-radius:15px;margin-top:12px;font-weight:850;line-height:1.55}.warn{background:#fff0f0;color:#b42318;border:2px solid #ffb4b4}.ok{background:#eaf8ef;color:#146c36}.smsfail{background:#fff8e5;color:#805700}.done{font-size:36px;font-weight:950;color:#16723a}.small{font-size:13px;color:#666;margin-top:10px}.hidden{display:none!important}.empty{text-align:center;padding:48px 10px;color:#666}.loader{text-align:center;padding:40px 0;font-weight:850}.pill{display:inline-block;padding:5px 9px;border-radius:999px;background:#eef0f4;font-size:12px;font-weight:850}
@@ -15,12 +15,21 @@
 </div>
 <script>
 const qs=new URLSearchParams(location.search);
-const tenant=qs.get('tenant')||'FIRST-0001';
+const urlTenant=qs.get('tenant')||'';
+const urlToken=qs.get('token')||'';
+if(urlTenant)localStorage.setItem('FIRST_OMS_PACKING_TENANT',urlTenant);
+if(urlToken)localStorage.setItem('FIRST_OMS_PACKING_TOKEN',urlToken);
+const tenant=urlTenant||localStorage.getItem('FIRST_OMS_PACKING_TENANT')||'FIRST-0001';
+const token=urlToken||localStorage.getItem('FIRST_OMS_PACKING_TOKEN')||'';
 const fixedCode=(qs.get('code')||'').trim().toUpperCase();
 let worker=localStorage.getItem('FIRST_OMS_PACKER_NAME')||'';
 let job=null,stream=null,scanTimer=null,zxingReader=null,locked=false;
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-const totalQty=items=>(items||[]).reduce((a,x)=>a+(Number(x.qty)||0),0);
+const normNo=v=>String(v??'').replace(/^#/,'').trim();
+function packCalc(x){const q=Math.max(0,Number(x?.qty)||0),r=job?.packingRules?.[normNo(x?.number)]||null;if(!r)return {orderQty:q,saleUnit:'개',componentQty:1,componentUnit:'개',actualQty:q,actualUnit:'개',componentTotal:q,rule:null};const cq=Math.max(1,Number(r.componentQty)||1),sale=r.saleUnit||'개',cu=r.componentUnit||sale,au=r.actualUnit||cu;const per=au===cu?cq:1;return {orderQty:q,saleUnit:sale,componentQty:cq,componentUnit:cu,actualQty:q*per,actualUnit:au,componentTotal:q*cq,rule:r}}
+const totalQty=items=>(items||[]).reduce((a,x)=>a+packCalc(x).actualQty,0);
+function explainPack(c){if(!c.rule)return '';return `${c.orderQty}${c.saleUnit} · 1${c.saleUnit}=${c.componentQty}${c.componentUnit}${c.actualUnit!==c.componentUnit?` · 실제포장 ${c.actualUnit}`:''}`}
+function packLine(x){const c=packCalc(x);return `<div class="item"><div class="name">#${esc(x.number)} ${esc(x.item)}${explainPack(c)?`<div class="small">${esc(explainPack(c))}${c.componentTotal!==c.actualQty?` · 총 구성 ${c.componentTotal}${esc(c.componentUnit)}`:''}</div>`:''}</div><div class="qty">${c.actualQty}${esc(c.actualUnit)}<div class="small">넣으세요</div></div></div>`}
 function askWorker(force=false){
  if(worker&&!force)return true;
  const v=prompt('포장자 이름을 입력해주세요',worker||'');
@@ -28,10 +37,11 @@ function askWorker(force=false){
  worker=v.trim();localStorage.setItem('FIRST_OMS_PACKER_NAME',worker);return true;
 }
 async function loadJob(){
+ if(!token){document.getElementById('app').innerHTML='<div class="notice warn"><b>포장팀 접속키가 없습니다.</b><br>관리자 화면에서 <b>휴대폰 포장화면</b>을 이 기기에서 한 번 열어주세요.</div>';return}
  if(!askWorker()){document.getElementById('app').innerHTML='<div class="empty">포장자 이름을 입력해야 작업을 시작할 수 있습니다.<button class="btn primary" onclick="loadJob()">이름 입력</button></div>';return}
  stopScan();locked=false;
  try{
-  let url=fixedCode?'/api/public/packing?code='+encodeURIComponent(fixedCode):'/api/public/packing/next?tenant='+encodeURIComponent(tenant)+'&worker='+encodeURIComponent(worker);
+  let url=fixedCode?'/api/public/packing?tenant='+encodeURIComponent(tenant)+'&code='+encodeURIComponent(fixedCode)+'&token='+encodeURIComponent(token):'/api/public/packing/next?tenant='+encodeURIComponent(tenant)+'&worker='+encodeURIComponent(worker)+'&token='+encodeURIComponent(token);
   const r=await fetch(url,{cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'조회 실패');
   job=d.job||null;if(job&&!job.tenantCode)job.tenantCode=tenant;
   renderJob();
@@ -44,16 +54,16 @@ function renderJob(){
  const normal=(job.items||[]).filter(x=>!x.service),services=(job.items||[]).filter(x=>x.service);
  app.innerHTML=`<div class="top"><div class="worker">${esc(worker)}님 <span class="pill">자동 저장됨</span></div><button class="change" onclick="changeWorker()">포장자 변경</button></div>
  <div class="job">${esc(job.jobNo||'')}번 / ${esc(job.name||job.nick||'고객')}</div>
- <div class="count">📦 총 ${totalQty(job.items)}개 넣으세요</div>
- <div class="items">${normal.map(x=>`<div class="item"><div class="name">#${esc(x.number)} ${esc(x.item)}</div><div class="qty">×${Number(x.qty)||0}</div></div>`).join('')}</div>
- ${services.length?`<div class="service">🩵 🎁 서비스<br>${services.map(x=>`#${esc(x.number)} ${esc(x.item)} ×${Number(x.qty)||0}`).join('<br>')}</div>`:''}
+ <div class="count">📦 실제 포장 총 ${totalQty(job.items)}단위</div>
+ <div class="items">${normal.map(packLine).join('')}</div>
+ ${services.length?`<div class="service">🩵 🎁 서비스 상품 (꼭 같이 넣어주세요!)<br>${services.map(x=>{const c=packCalc(x);return `#${esc(x.number)} ${esc(x.item)} → <b>${c.actualQty}${esc(c.actualUnit)} 넣으세요</b>${explainPack(c)?`<div class="small">${esc(explainPack(c))}</div>`:''}`}).join('<br>')}</div>`:''}
  <button class="btn good" onclick="packed()">다 넣었어요</button>
  <div class="small">이 버튼을 누르면 관리자 택배리스트에 즉시 포장완료로 기록됩니다. 이후 송장스캔이 끝날 때까지 다음 주문으로 넘어갈 수 없습니다.</div>`;
 }
 async function packed(){
  if(locked)return;locked=true;
  try{
-  const r=await fetch('/api/public/packing/packed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tenantCode:job.tenantCode||tenant,code:job.code,worker})}),d=await r.json();
+  const r=await fetch('/api/public/packing/packed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tenantCode:job.tenantCode||tenant,code:job.code,worker,token})}),d=await r.json();
   if(!r.ok||!d.ok)throw new Error(d.error||'포장완료 처리 실패');
   job.status='packed';job.completedAt=d.packingCompletedAt;showScanner();
  }catch(e){alert(e.message);locked=false}
@@ -92,7 +102,7 @@ async function finalScan(raw){
  if(status)status.textContent='송장을 확인하는 중입니다...';
  stopScan();
  try{
-  const r=await fetch('/api/public/packing/scan-final',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tenantCode:job.tenantCode||tenant,code:job.code,worker,trackingNumber:tracking})}),d=await r.json();
+  const r=await fetch('/api/public/packing/scan-final',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tenantCode:job.tenantCode||tenant,code:job.code,worker,trackingNumber:tracking,token})}),d=await r.json();
   if(!r.ok||!d.ok){
    if(d.reason==='WRONG_LABEL'){document.getElementById('app').innerHTML=`<div class="notice warn" style="font-size:24px;text-align:center"><div style="font-size:42px">🚨</div><b>잘못된 송장입니다</b><br><br>이 송장을 붙이면 안 됩니다.<br>현재 고객의 송장을 다시 스캔해주세요.</div><button class="btn primary" onclick="showScanner()">현재 고객 송장 다시 스캔</button>`;locked=false;return}
    throw new Error(d.error||'송장 확인 실패')
