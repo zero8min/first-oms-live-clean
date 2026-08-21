@@ -1,0 +1,13 @@
+/* OMS v7.55 usability fixes */
+#customersTable .scroll,#receiptCards .scroll,#shippingTable .scroll{overflow:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+#customersTable table{min-width:1180px;width:100%}
+#customersTable th:last-child,#customersTable td:last-child{position:sticky;right:0;background:#fff;z-index:2;box-shadow:-4px 0 8px #0000000c;min-width:150px}
+#customersTable thead th:last-child{background:#f6f6f7;z-index:3}
+.v755-issue-card{margin:12px 0;border:2px solid #f2b84b;background:#fffaf0}
+.v755-issue-card h3{margin:0}.v755-issue-badge{display:inline-block;padding:4px 9px;border-radius:999px;background:#fff0c7;color:#7b5200;font-weight:900}
+.v755-badphone{color:#c62828;font-weight:900}.v755-missing{color:#9a5a00;font-weight:800}
+.v755-ship-table{min-width:1450px}.v755-ship-table .ship-items{min-width:390px;line-height:1.7}.v755-actual{font-weight:950;font-size:16px}.v755-option{color:#7047a8;font-weight:800}.v755-shortage{color:#c00;font-weight:950}
+.v755-preview-back{position:fixed;inset:0;background:#0009;z-index:999999;display:flex;align-items:center;justify-content:center;padding:18px}
+.v755-preview{background:white;color:#111;border-radius:18px;max-width:920px;width:100%;max-height:92vh;overflow:auto;padding:18px}
+.v755-preview img{display:block;max-width:100%;height:auto;margin:10px auto;border:1px solid #ddd}.v755-preview-actions{position:sticky;bottom:0;background:#fff;padding-top:12px;display:flex;gap:8px;justify-content:flex-end}
+.v755-archive-table{min-width:900px}.v755-click{cursor:pointer;text-decoration:underline;text-underline-offset:3px}

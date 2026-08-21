@@ -171,10 +171,11 @@ main{padding-top:18px}
 .payment-check{width:20px;height:20px}.locked-input{background:#eceff3!important;color:#555!important}.payment-manual-select{min-width:130px}
 @media(max-width:800px){.shipping-table{min-width:1450px}.payment-filter-bar .btn{flex:1 1 42%}}
 </style>
+<link rel="stylesheet" href="/v755.css?v=755">
 </head>
 <body><div id="tenantGuard" style="display:none;position:sticky;top:0;z-index:99999;background:#7b2d2d;color:#fff;padding:10px 16px;font-weight:900;text-align:center;box-shadow:0 2px 8px #0005"></div>
 <header>
-  <div><div class="brand"><b>FIRST OMS</b> 땡라이브 정산서버 v7.50</div><div class="sub">고객DB·판매리스트 3중 자동보존 · 정산 · 입금 · 택배</div></div>
+  <div><div class="brand"><b>FIRST OMS</b> 땡라이브 정산서버 v7.55</div><div class="sub">고객DB·판매리스트 3중 자동보존 · 정산 · 입금 · 택배</div></div>
   <div class="actions no-print">
     <span id="loginUser" class="sub">로그인 확인 중</span><button id="accountAdminBtn" class="btn secondary" style="display:none" onclick="location.href='/superadmin.html'">거래처 계정관리</button><button class="btn secondary" onclick="location.href='/change-password.html'">비밀번호 변경</button><button class="btn secondary" onclick="runFunctionCheck()">기능점검</button><button class="btn secondary" onclick="logoutNow()">로그아웃</button>
     <button class="btn secondary" onclick="recoverOldData()">이전 고객DB 복구</button>
@@ -2292,5 +2293,6 @@ setTimeout(()=>{try{renderCustomers();renderReceipts();renderShipping()}catch(e)
  setTimeout(()=>{renderPackingRulesV750();refreshPackingProductsV750()},700);
 })();
 </script>
+<script src="/v755.js?v=755"></script>
 </body>
 </html>
