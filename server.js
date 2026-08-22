@@ -391,6 +391,41 @@ function restoreBundledDdaengCustomersIfNewerOnce(){
 }
 restoreBundledDdaengCustomersIfNewerOnce();
 
+// v7.66: 사용자 제공 8/20-21 고객 344명 백업을 FIRST-0001 고객DB 기준으로 반영한다.
+// - 현재 고객이 344명 이하이면 제공 백업 344명을 기준으로 사용한다.
+// - 이미 344명을 초과했다면 신규 고객 보호를 위해 ID 기준 병합한다.
+// - 주문/입금/설정/SOLAPI는 변경하지 않는다.
+function restoreUserProvidedCustomers344Once(){
+ try{
+  const src=path.join(ROOT,'data','user-customers-344.json');
+  if(!fs.existsSync(src))return;
+  const marker=path.join(DATA_ROOT,'.v766-user-customers-344-restored');
+  if(fs.existsSync(marker))return;
+  const exp=readJsonObject(src,{}),incoming=Array.isArray(exp.customers)?exp.customers:[];
+  if(incoming.length!==344)return;
+  ensureTenantStorage({code:DDAENG_TENANT_CODE});
+  const current=tenantReadCustomers(DDAENG_TENANT_CODE);
+  let next;
+  if(current.length<=incoming.length){
+   next=incoming;
+  }else{
+   const byId=new Map(current.map(c=>[String(c.id||''),c]));
+   for(const c of incoming){
+    const id=String(c.id||'');
+    if(id)byId.set(id,{...(byId.get(id)||{}),...c});
+   }
+   next=Array.from(byId.values());
+  }
+  tenantWriteCustomers(DDAENG_TENANT_CODE,next);
+  const st=tenantReadState(DDAENG_TENANT_CODE);
+  st.customers=next;
+  tenantWriteState(DDAENG_TENANT_CODE,st);
+  atomicWrite(marker,JSON.stringify({tenantCode:DDAENG_TENANT_CODE,before:current.length,after:next.length,at:new Date().toISOString(),source:'data/user-customers-344.json',scope:'customers-only'},null,2));
+  console.log(`[CUSTOMER RECOVERY v7.66] ${DDAENG_TENANT_CODE}: ${current.length} -> ${next.length}`);
+ }catch(e){console.error('[CUSTOMER RECOVERY v7.66] 실패:',e.message)}
+}
+restoreUserProvidedCustomers344Once();
+
 
 // v7.47.3: 사용자가 직접 제공한 8/13 백업 2개를 FIRST-0001에 비파괴 복구한다.
 // - 고객 321명 백업은 현재 고객보다 누락된 고객만 합쳐서 보존한다.
