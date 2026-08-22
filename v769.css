@@ -1,0 +1,2 @@
+/* OMS v7.69 */
+.v769-toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 14px}.v769-simple-note{padding:12px 14px;border:1px solid #555;border-radius:10px;background:#20252c;margin-bottom:12px}.v769-customer-mini{display:grid;grid-template-columns:minmax(160px,1.2fr) minmax(100px,.8fr) minmax(130px,.8fr) minmax(130px,.8fr);gap:12px;align-items:center;padding:10px 12px;border-bottom:1px solid #454b54}.v769-customer-mini b{font-size:16px}@media(max-width:900px){.v769-customer-mini{grid-template-columns:1fr 1fr}.v769-toolbar .btn{flex:1 1 160px}}
