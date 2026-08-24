@@ -247,4 +247,109 @@ const __oldMountStandaloneSafe=mountStandalone;mountStandalone=function(){__oldM
 `;document.head.appendChild(st)})();
 
 
+// ===== MINIMAL PATCH: receipt width/page nav, fixed shipping view, reliable print, courier fields, dated server save =====
+function receiptPagesForModalSafe(r){
+  const items=expandedItemsSafe(r.items||[]), per=9, n=Math.max(1,Math.ceil(items.length/per)), pages=[];
+  for(let i=0;i<n;i++) pages.push(receiptPage({...r,items},items.slice(i*per,(i+1)*per),i+1,n,i===n-1));
+  return pages;
+}
+
+window.openReceiptDetail=function(key){
+  const r=receiptGroups().find(x=>x.key===key); if(!r)return alert('정산서를 찾을 수 없습니다.');
+  const pages=receiptPagesForModalSafe(r); let pos=0;
+  let modal=$('receiptDetailModal');
+  if(!modal){
+    modal=document.createElement('div'); modal.id='receiptDetailModal'; modal.className='receipt-detail-modal';
+    modal.innerHTML='<div class="receipt-detail-box"><div class="receipt-detail-actions no-print"><button class="btn warn" id="detailEditBtn">수정</button><button class="btn secondary" id="detailPrevBtn">◀</button><b id="detailPageNav" style="min-width:70px;text-align:center"></b><button class="btn secondary" id="detailNextBtn">▶</button><button class="btn secondary" id="detailPrintBtn">인쇄</button><button class="btn bad" id="detailCloseBtn">닫기</button></div><div id="receiptDetailBody"></div></div>';
+    document.body.appendChild(modal);
+  }
+  const body=$('receiptDetailBody'), nav=$('detailPageNav'), prev=$('detailPrevBtn'), next=$('detailNextBtn');
+  const draw=()=>{body.innerHTML=pages[pos]; nav.textContent=`< ${pos+1}/${pages.length} >`; prev.disabled=pos===0; next.disabled=pos===pages.length-1;};
+  modal.classList.add('show'); draw();
+  $('detailEditBtn').onclick=()=>openReceiptEditByKey(key);
+  prev.onclick=()=>{if(pos>0){pos--;draw()}}; next.onclick=()=>{if(pos<pages.length-1){pos++;draw()}};
+  $('detailPrintBtn').onclick=()=>printReceiptSafe(key); $('detailCloseBtn').onclick=()=>modal.classList.remove('show');
+};
+
+// Make the on-screen shipping detail use exactly the same receipt-style sheet as print.
+window.openShippingDetailSafe=function(code){
+  const g=shippingByCodeSafe(code); if(!g)return alert('택배리스트를 찾을 수 없습니다.');
+  let m=$('shippingDetailSafeModal');
+  if(!m){m=document.createElement('div');m.id='shippingDetailSafeModal';m.className='receipt-detail-modal';m.innerHTML='<div class="receipt-detail-box"><div class="receipt-detail-actions no-print"><button class="btn secondary" id="shipPrintSafeBtn">인쇄</button><button class="btn bad" id="shipCloseSafeBtn">닫기</button></div><div id="shipDetailSafeBody"></div></div>';document.body.appendChild(m)}
+  m.classList.add('show'); $('shipDetailSafeBody').innerHTML=shippingSheet(g,1,1);
+  $('shipPrintSafeBtn').onclick=()=>openPrintWindow(shippingSheet(g,1,1),'택배리스트',false);
+  $('shipCloseSafeBtn').onclick=()=>m.classList.remove('show');
+};
+
+// Replace blank about:blank print behavior with a fully written document and wait for images before print.
+openPrintWindow=function(body,title,qr=true){
+  const w=window.open('','_blank'); if(!w)return alert('팝업 차단을 해제해 주세요.');
+  const html='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title>'+printCss()+'</head><body>'+body+'</body></html>';
+  try{w.document.open();w.document.write(html);w.document.close();}catch(e){try{w.document.documentElement.innerHTML=html}catch(_){return alert('인쇄 화면 생성 실패: '+e.message)}}
+  const doPrint=()=>{try{w.focus();w.print()}catch(e){alert('인쇄 실행 실패: '+e.message)}};
+  const wait=()=>{const imgs=[...w.document.images]; if(w.document.readyState==='complete'&&imgs.every(i=>i.complete))setTimeout(doPrint,350); else setTimeout(wait,120)};
+  setTimeout(wait,120);
+};
+window.openPrintWindow=openPrintWindow;
+
+// Courier export: name / phone / address / fixed item / fixed message only. Never mix name into phone/address.
+function courierCustomerSafe(g){
+  const hit=findCustomerSafe(g.nick||g.name||'')?.customer||{};
+  const name=String(hit.name||g.name||g.nick||'').trim();
+  const rawPhone=String(hit.phone||g.phone||'');
+  const m=rawPhone.match(/01[016789][\s.-]?\d{3,4}[\s.-]?\d{4}/);
+  let ph=m?m[0].replace(/\D/g,''):rawPhone.replace(/\D/g,'');
+  if(ph.length===11)ph=ph.replace(/(\d{3})(\d{4})(\d{4})/,'$1-$2-$3'); else if(ph.length===10)ph=ph.replace(/(\d{3})(\d{3})(\d{4})/,'$1-$2-$3');
+  const addr=[hit.address||g.address||'',hit.detailAddress||''].map(v=>String(v).trim()).filter(Boolean).join(' ').replace(/^\s*[^\d가-힣]*$/,'').trim();
+  const postal=String(hit.postalCode||g.postalCode||'').trim();
+  return {name,phone:ph,address:addr,postal};
+}
+window.downloadCourierUploadFile=function(){
+  const headers=state.settings?.courier?.templateHeaders||[]; if(!headers.length)return alert('먼저 택배사 송장 양식 파일을 업로드해 주세요.');
+  const groups=shippingPaidGroups(); if(!groups.length)return alert('입금완료된 택배 대상이 없습니다.');
+  const value=(h,g)=>{const n=norm(h),c=courierCustomerSafe(g); if(/받는분|수하인|수취인|고객명|성명|이름/.test(n))return c.name; if(/전화|휴대폰|연락처|핸드폰|수하인전화|받는분전화/.test(n))return c.phone; if(/우편/.test(n))return c.postal; if(/주소|배송지/.test(n))return c.address; if(/내품명|상품명|품명/.test(n))return '잡화'; if(/배송메시지|배송메세지|배송메모|요청사항|메모/.test(n))return '안전한배송 부탁드려요'; return ''};
+  const rows=groups.map(g=>Object.fromEntries(headers.map(h=>[h,value(h,g)])));
+  const ws=XLSX.utils.json_to_sheet(rows,{header:headers}), wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'송장접수');
+  XLSX.writeFile(wb,`FIRST_OMS_${state.settings?.courier?.company||'택배사'}_송장접수_${new Date().toISOString().slice(0,10)}.xlsx`);
+};
+
+// Main Save button: choose a date, confirm, then persist that dated snapshot to server.
+async function commitDatedSaveSafe(date){
+  try{
+    const clone=JSON.parse(JSON.stringify(state)); delete clone.savedSnapshots;
+    state.savedSnapshots=state.savedSnapshots||{}; state.savedSnapshots[date]=clone; state.lastSavedDate=date;
+    localStorage.setItem(KEY,JSON.stringify(state));
+    const r=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)}); if(!r.ok)throw new Error('HTTP '+r.status);
+    alert(date.replace(/-/g,'.')+' 정보로 서버에 저장했습니다.');
+  }catch(e){alert('서버 저장 실패: '+e.message)}
+}
+function openDatedSaveSafe(){
+  let m=$('datedSaveSafeModal'); if(!m){m=document.createElement('div');m.id='datedSaveSafeModal';m.className='receipt-detail-modal';m.innerHTML='<div class="receipt-detail-box" style="max-width:420px!important;min-height:0!important"><h3 style="margin-top:0">저장 날짜 선택</h3><input id="datedSaveSafeInput" type="date" style="width:100%;padding:12px;font-size:18px"><div class="actions" style="margin-top:15px;justify-content:flex-end"><button class="btn secondary" id="datedSaveCancel">취소</button><button class="btn" id="datedSaveOk">저장</button></div></div>';document.body.appendChild(m)}
+  const inp=$('datedSaveSafeInput'); inp.value=new Date().toISOString().slice(0,10); m.classList.add('show');
+  $('datedSaveCancel').onclick=()=>m.classList.remove('show'); $('datedSaveOk').onclick=async()=>{const d=inp.value;if(!d)return alert('날짜를 선택해 주세요.');const [y,mo,da]=d.split('-');if(!confirm(`${y}년 ${mo}월 ${da}일 정보로 저장할까요?`))return;m.classList.remove('show');await commitDatedSaveSafe(d)};
+}
+window.saveAll=openDatedSaveSafe;
+
+(function addMinimalLayoutFixCss(){
+  let st=$('minimalLayoutFixCss'); if(st)st.remove(); st=document.createElement('style'); st.id='minimalLayoutFixCss'; st.textContent=`
+.receipt-detail-box{width:min(94vw,860px)!important;max-width:860px!important;overflow-x:hidden!important}
+#receiptDetailBody,#shipDetailSafeBody{overflow-x:hidden!important;width:100%!important}
+#receiptDetailBody .safe-receipt,#shipDetailSafeBody .safe-ship-sheet{width:100%!important;max-width:794px!important;min-width:0!important;min-height:auto!important;margin:0 auto 16px!important;padding:24px!important;box-sizing:border-box!important;background:#fff!important;color:#111!important}
+#receiptDetailBody .safe-receipt table,#shipDetailSafeBody .safe-ship-sheet table{width:100%!important;table-layout:fixed!important;border-collapse:collapse!important}
+#receiptDetailBody .safe-receipt th,#receiptDetailBody .safe-receipt td,#shipDetailSafeBody .safe-ship-sheet th,#shipDetailSafeBody .safe-ship-sheet td{padding:8px 5px!important;word-break:break-word!important;overflow-wrap:anywhere!important;color:#111}
+#receiptDetailBody .safe-receipt thead th,#shipDetailSafeBody .safe-ship-sheet thead th{background:#171717!important;color:#fff!important}
+#receiptDetailBody .safe-receipt th:nth-child(1){width:15%!important}#receiptDetailBody .safe-receipt th:nth-child(2){width:23%!important}#receiptDetailBody .safe-receipt th:nth-child(3){width:21%!important}#receiptDetailBody .safe-receipt th:nth-child(4){width:9%!important}#receiptDetailBody .safe-receipt th:nth-child(5){width:15%!important}#receiptDetailBody .safe-receipt th:nth-child(6){width:17%!important}
+#shipDetailSafeBody .safe-ship-sheet h1{text-align:center!important;font-size:38px!important;letter-spacing:14px!important;margin:0 0 18px!important}
+#shipDetailSafeBody .ss-seller{border:1px solid #aaa!important;padding:10px 12px!important;display:flex!important;justify-content:space-between!important}
+#shipDetailSafeBody .ss-customer{display:grid!important;grid-template-columns:100px 1fr 1.45fr!important;border:1px solid #aaa!important;border-top:0!important;min-height:88px!important}
+#shipDetailSafeBody .ss-customer>div{padding:12px!important;border-right:1px solid #aaa!important}#shipDetailSafeBody .ss-customer>div:last-child{border-right:0!important}
+#shipDetailSafeBody .safe-ship-sheet th:nth-child(1){width:13%!important}#shipDetailSafeBody .safe-ship-sheet th:nth-child(2){width:19%!important}#shipDetailSafeBody .safe-ship-sheet th:nth-child(3){width:19%!important}#shipDetailSafeBody .safe-ship-sheet th:nth-child(4){width:11%!important}#shipDetailSafeBody .safe-ship-sheet th:nth-child(5){width:15%!important}#shipDetailSafeBody .safe-ship-sheet th:nth-child(6){width:23%!important}
+#shipDetailSafeBody .work{background:#fff2b2!important}#shipDetailSafeBody .work b{font-size:25px!important;color:#c20!important}#shipDetailSafeBody .work small{display:block!important;color:#222!important}
+#shipDetailSafeBody .ss-total{margin-top:12px!important;border:1px solid #aaa!important;padding:10px!important;text-align:center!important;font-size:20px!important}#shipDetailSafeBody .ss-total strong{font-size:36px!important;color:#c00!important;margin:0 15px!important}
+#shipDetailSafeBody .ss-bottom{display:grid!important;grid-template-columns:1fr 1.3fr!important;gap:12px!important;margin-top:12px!important;text-align:center!important}#shipDetailSafeBody .ss-bottom>div{border:1px solid #aaa!important;padding:10px!important;min-height:210px!important}.labelbox>div{border:1px dashed #999!important;margin-top:14px!important;min-height:120px!important;padding:30px 10px!important;color:#666!important}.ss-foot{margin-top:10px!important;border:1px solid #aaa!important;padding:10px!important;text-align:center!important}
+`;
+  document.head.appendChild(st);
+})();
+
+
 })();
