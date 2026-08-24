@@ -400,3 +400,73 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
 `;document.head.appendChild(st)})();
 
 })();
+
+/* ===== 2026-08-24 ONLY FIX: 입금완료 고객 송장파일 만들기 =====
+   다른 화면/디자인/저장 데이터는 변경하지 않는다. */
+(function(){
+  function _digits(v){ return String(v||'').replace(/\D/g,''); }
+  function _fmtPhone(v){
+    const d=_digits(v);
+    if(d.length===11) return d.replace(/(\d{3})(\d{4})(\d{4})/,'$1-$2-$3');
+    if(d.length===10) return d.replace(/(\d{3})(\d{3})(\d{4})/,'$1-$2-$3');
+    return String(v||'').trim();
+  }
+  function _cleanAddress(v){
+    return String(v||'').replace(/^\s*\d{5,6}\s+/, '').replace(/\s+/g,' ').trim();
+  }
+  function _customerForReceipt(r){
+    let c=r?.customer||{};
+    try{
+      if((!c.phone || !c.address) && typeof findCustomerSafe==='function'){
+        const hit=findCustomerSafe(r?.nick||c?.name||'');
+        if(hit?.customer) c={...c,...hit.customer};
+      }
+    }catch(e){}
+    return c||{};
+  }
+  function _paidReceipts(){
+    let rs=[];
+    try{ rs=(typeof getReceipts==='function'?getReceipts():[])||[]; }catch(e){ rs=[]; }
+    return rs.filter(r=>r?.payment?.status==='paid');
+  }
+  window.downloadCourierUploadFile=function(){
+    try{
+      if(typeof XLSX==='undefined') return alert('엑셀 기능을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요.');
+      const paid=_paidReceipts();
+      if(!paid.length) return alert('입금완료 고객이 없습니다. 입금대조에서 입금완료 상태를 확인해 주세요.');
+
+      // 고객별 1행: 같은 고객의 입금완료 정산서가 여러 개여도 송장접수 파일에는 한 번만 기록.
+      const map=new Map();
+      paid.forEach((r,i)=>{
+        const c=_customerForReceipt(r);
+        const key=String(c.id||_digits(c.phone)||r.nick||c.name||('row'+i));
+        if(map.has(key)) return;
+        const name=String(c.name||r.nick||'').trim();
+        const phone=_fmtPhone(c.phone||'');
+        const address=_cleanAddress([c.address||'',c.detailAddress||''].filter(Boolean).join(' '));
+        map.set(key,{
+          '성함':name,
+          '전화번호':phone,
+          '주소':address,
+          '내품명':'잡화',
+          '배송메시지':'안전한배송 부탁드려요'
+        });
+      });
+      const rows=[...map.values()];
+      const missing=rows.filter(x=>!x['전화번호']||!x['주소']);
+      if(missing.length){
+        const ok=confirm(`입금완료 ${rows.length}명 중 연락처 또는 주소가 비어있는 고객이 ${missing.length}명 있습니다.\n그래도 송장파일을 만들까요?`);
+        if(!ok) return;
+      }
+      const headers=['성함','전화번호','주소','내품명','배송메시지'];
+      const ws=XLSX.utils.json_to_sheet(rows,{header:headers});
+      ws['!cols']=[{wch:14},{wch:16},{wch:50},{wch:12},{wch:28}];
+      const wb=XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb,ws,'송장접수');
+      const date=new Date().toISOString().slice(0,10);
+      XLSX.writeFile(wb,`FIRST_OMS_입금완료_송장접수_${date}.xlsx`);
+    }catch(err){
+      alert('송장파일 만들기 실패: '+(err?.message||err));
+    }
+  };
+})();
