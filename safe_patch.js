@@ -470,3 +470,59 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
     }
   };
 })();
+
+/* === SERVER AUTO-SAVE SAFETY PATCH ===
+   Any in-memory state change is persisted to /api/state after a short debounce.
+   Existing UI/design is untouched. */
+(function(){
+  try{
+    let lastSavedJson = '';
+    let saving = false;
+    let pending = false;
+    let timer = null;
+    async function persistStateNow(){
+      if(typeof state === 'undefined') return;
+      let json;
+      try{ json = JSON.stringify(state); }catch(e){ return; }
+      if(!json || json === lastSavedJson) return;
+      if(saving){ pending = true; return; }
+      saving = true;
+      try{
+        try{ if(typeof KEY !== 'undefined') localStorage.setItem(KEY,json); }catch(e){}
+        const r = await fetch('/api/state', {method:'POST',headers:{'Content-Type':'application/json'},body:json});
+        if(r.ok) lastSavedJson = json;
+      }catch(e){
+        // keep local copy; next detected change / interval retries server save
+      }finally{
+        saving = false;
+        if(pending){ pending = false; setTimeout(persistStateNow,300); }
+      }
+    }
+    function schedulePersist(){
+      clearTimeout(timer);
+      timer = setTimeout(persistStateNow,1200);
+    }
+    // Capture user edits after existing handlers have updated state.
+    document.addEventListener('input',()=>setTimeout(schedulePersist,0),true);
+    document.addEventListener('change',()=>setTimeout(schedulePersist,0),true);
+    document.addEventListener('click',()=>setTimeout(schedulePersist,50),true);
+    // Also detect programmatic state changes that do not originate from a DOM event.
+    setInterval(()=>{
+      try{
+        if(typeof state === 'undefined') return;
+        const j=JSON.stringify(state);
+        if(j!==lastSavedJson) schedulePersist();
+      }catch(e){}
+    },2500);
+    window.addEventListener('pagehide',()=>{
+      try{
+        if(typeof state==='undefined') return;
+        const json=JSON.stringify(state);
+        try{ if(typeof KEY!=='undefined') localStorage.setItem(KEY,json); }catch(e){}
+        if(navigator.sendBeacon) navigator.sendBeacon('/api/state',new Blob([json],{type:'application/json'}));
+      }catch(e){}
+    });
+    // Initialize comparison after server/local load settles.
+    setTimeout(()=>{ try{ lastSavedJson=JSON.stringify(state); }catch(e){} },3000);
+  }catch(e){}
+})();
