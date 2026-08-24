@@ -143,4 +143,108 @@ function injectStyle(){if($('safePatchStyle'))return;const s=document.createElem
 
 async function initSafe(){injectStyle();mountStandalone();try{if(typeof syncServerCustomers==='function')await syncServerCustomers(false)}catch(e){}try{autoMatchAll();if(typeof renderReceipts==='function')renderReceipts();renderShipping()}catch(e){console.error('safe init',e)}}
 document.addEventListener('DOMContentLoaded',initSafe);if(document.readyState!=='loading')setTimeout(initSafe,0);
+
+// ===== 2026-08-24 targeted fixes: receipt/shipping/payment/courier =====
+function splitCompositeOrderSafe(x){
+  const raw=String(x?.item??'').trim();
+  if(!raw)return [x];
+  const parts=raw.split(/\s*\/\s*(?=[^/]{1,100}?\s+\d+(?:\.\d+)?\s*(?:개|봉지|봉|세트|묶음|팩|박스|켤레)\b)/i).map(v=>v.trim()).filter(Boolean);
+  if(parts.length<=1)return [x];
+  return parts.map((seg,i)=>{
+    const qm=seg.match(/(?:^|\s)(\d+(?:\.\d+)?)\s*(개|봉지|봉|세트|묶음|팩|박스|켤레)\s*$/i);
+    const qty=qm?Number(qm[1]):(i===0?(Number(x.qty)||1):1);
+    const item=qm?seg.slice(0,qm.index).trim():seg;
+    return {...x,id:String(x.id||'')+'__'+i,item:item||seg,qty,unit:i===0?(Number(x.unit)||0):0,amount:i===0?(Number(x.amount)||0):0,__split:true};
+  });
+}
+function expandedItemsSafe(items){return (items||[]).flatMap(splitCompositeOrderSafe)}
+
+const __oldItemRowData=itemRowData;
+itemRowData=function(x){return __oldItemRowData(x)};
+
+// detailed payment reconciliation
+function amountSafe(v){const n=Number(String(v??'').replace(/[^0-9.-]/g,''));return Number.isFinite(n)?Math.round(n):0}
+function payerVariantsSafe(v){
+  const raw=String(v??'').normalize('NFKC').trim();
+  const a=[raw];
+  raw.replace(/\(([^()]*)\)|\[([^\[\]]*)\]|\{([^{}]*)\}/g,(_,x,y,z)=>{const t=(x||y||z||'').trim();if(t)a.push(t);return _});
+  a.push(raw.replace(/\([^)]*\)|\[[^\]]*\]|\{[^}]*\}/g,' '));
+  return [...new Set(a.map(norm).filter(Boolean))];
+}
+function receiptAliasesSafe(r){const c=r.customer||{};return [...new Set([r.nick,c.nick,c.nickname,c.name].flatMap(payerVariantsSafe).filter(Boolean))]}
+function payerMatchesSafe(payer,aliases){const ps=payerVariantsSafe(payer);return ps.some(p=>aliases.some(a=>p===a||(p.length>=2&&a.length>=2&&(p.includes(a)||a.includes(p)))))}
+function paymentDateScoreSafe(p,rdate){const d=String(p?.date||p?.datetime||p?.at||'').slice(0,10);if(!d||!rdate)return 0;if(d===rdate)return 10;try{return Math.max(0,5-Math.abs((new Date(d)-new Date(rdate))/86400000))}catch(e){return 0}}
+
+const __baseGetReceiptsSafe=window.getReceipts;
+window.getReceipts=function(){
+  let rs=__baseGetReceiptsSafe?__baseGetReceiptsSafe():[];
+  // ensure current customer DB is reflected every time
+  rs=rs.map(r=>{const m=findCustomerSafe(r.nick);if(m.customer){r.customer=m.customer;r.customerId=m.customer.id;r.matchStatus=m.status}return r});
+  const used=new Set();
+  for(const r of rs){
+    const ov=state.paymentOverrides?.[r.key];
+    if(ov?.status){r.payment={status:ov.status,payment:ov.payment||null,verified:ov.status==='paid',manual:true,reason:'관리자 수기변경'};continue}
+    const aliases=receiptAliasesSafe(r), total=amountSafe(r.total);
+    const named=(state.payments||[]).map((p,i)=>({p,i,amt:amountSafe(p.amount)})).filter(z=>!used.has(z.i)&&payerMatchesSafe(z.p.payer||z.p.name||z.p.depositor,aliases));
+    const exact=named.filter(z=>z.amt===total).sort((a,b)=>paymentDateScoreSafe(b.p,r.date)-paymentDateScoreSafe(a.p,r.date));
+    if(exact.length){const z=exact[0];used.add(z.i);r.payment={status:'paid',payment:z.p,paidAmount:z.amt,verified:true,reason:'입금자명 + 청구금액 정확일치'};continue}
+    let combo=null;
+    const cand=named.slice(0,10);
+    for(let mask=1;mask<(1<<cand.length)&&!combo;mask++){let sum=0,sel=[];for(let j=0;j<cand.length;j++)if(mask>>j&1){sum+=cand[j].amt;sel.push(cand[j])}if(sum===total&&sel.length>1)combo=sel}
+    if(combo){combo.forEach(z=>used.add(z.i));r.payment={status:'paid',payment:combo[0].p,payments:combo.map(z=>z.p),paidAmount:total,verified:true,reason:'동일 입금자 분할입금 합계 일치'};continue}
+    if(named.length){const paid=named.reduce((a,z)=>a+z.amt,0);r.payment={status:'amount-mismatch',payment:named[0].p,payments:named.map(z=>z.p),paidAmount:paid,verified:false,reason:`입금자명 일치 · 청구 ${total.toLocaleString()}원 / 입금합계 ${paid.toLocaleString()}원`};continue}
+    const amountOnly=(state.payments||[]).map((p,i)=>({p,i,amt:amountSafe(p.amount)})).filter(z=>!used.has(z.i)&&z.amt===total);
+    if(amountOnly.length===1){r.payment={status:'review',payment:amountOnly[0].p,paidAmount:total,verified:false,reason:'금액은 일치하지만 입금자명 확인 필요'};continue}
+    r.payment={status:'unpaid',verified:false,paidAmount:0};
+  }
+  return rs;
+};
+
+// one product per row, even when a source cell contains multiple products
+receiptPage=function(r,items,page,totalPages,last){
+  items=expandedItemsSafe(items);
+  const c=r.customer||{},seller=r.items?.find(x=>x.seller)?.seller||window.__tenantCompany||state.settings?.company||'땡라이브';
+  const rows=items.map(x=>{const d=itemRowData(x);return `<tr><td>#${esc(d.num)}</td><td>${esc(d.name)}</td><td>${esc(d.option)}</td><td>${d.qty}</td><td>${money(d.unit)}</td><td>${money(d.amount)}</td></tr>`}).join('');
+  const footer=last?`<div class="sr-totals"><div><b>상품 합계</b><strong>${money(r.subtotal)}</strong></div><div class="fee"><b>택배비</b><strong>${money(r.fee)}</strong></div><div class="grand"><b>총 결제 금액</b><strong>${money(r.total)}</strong></div></div><div class="sr-bank">🏦 <b>입금계좌</b><span>${esc(state.settings?.bank||'')} ${esc(state.settings?.account||'')} &nbsp; 예금주 ${esc(state.settings?.holder||'')}</span></div><div class="sr-notice">❗ 입금자명은 닉네임 “${esc(r.nick)}”으로 입금 바랍니다.</div>`:'';
+  return `<article class="safe-receipt"><div class="sr-page">${page}/${totalPages}</div><h1>정 산 서</h1><div class="sr-seller"><b>판매자 : ${esc(seller)}</b><span><b>주문일자</b> ${esc(r.date)}</span></div><div class="sr-customer"><div class="label">고객정보</div><div class="who"><span>닉네임 : </span><b>${esc(r.nick)}</b><small> / ${esc(c.name||'정보없음')}님</small></div><div class="contact">☎ 연락처 : ${esc(c.phone||'-')}<br>⌖ 주소 : ${esc([c.postalCode,c.address,c.detailAddress].filter(Boolean).join(' ')||'-')}</div></div><table><thead><tr><th>품번</th><th>품명</th><th>옵션</th><th>수량</th><th>단가</th><th>합계</th></tr></thead><tbody>${rows}</tbody></table>${footer}<div class="sr-thanks">감사합니다. 좋은 하루 되세요!<br>${esc(seller)}</div></article>`;
+};
+receiptHtmlSafe=function(r){const items=expandedItemsSafe(r.items||[]),per=9,pages=[],n=Math.max(1,Math.ceil(items.length/per));for(let i=0;i<n;i++)pages.push(receiptPage({...r,items},items.slice(i*per,(i+1)*per),i+1,n,i===n-1));return pages.join('')};
+window.receiptHTML=receiptHtmlSafe;window.safeReceiptHTML=receiptHtmlSafe;
+
+// shipping sheets: receipt-like customer information and stable print
+function shippingByCodeSafe(code){return shippingGroups().find(g=>g.code===code)}
+shippingSheet=function(g,idx,total){
+ const items=expandedItemsSafe(g.items||[]);
+ const rows=items.map(x=>{const d=itemRowData(x),p=packText(x);return `<tr class="${isKimchi(x)?'kimchi-row':''}"><td>#${esc(d.num)}</td><td>${esc(d.name)}</td><td>${esc(d.option)}</td><td>${d.qty}</td><td>${money(d.unit)}</td><td class="work"><b>${esc(p.main)}</b><small>(${esc(p.detail)})</small></td></tr>`}).join('');
+ const totalWork=items.reduce((a,x)=>a+(Number(packCalc(x).actualQty)||0),0),tracking=g.tracking||'';
+ return `<section class="safe-ship-sheet"><div class="ss-page">${idx}/${total}</div><h1>택 배 리 스 트</h1><div class="ss-seller"><b>판매자 : ${esc(g.seller||window.__tenantCompany||'땡라이브')}</b><span>주문일자 : ${esc([...g.dates].join(', '))}</span></div><div class="ss-customer"><div class="label">고객정보</div><div class="who"><span>닉네임 : </span><b>${esc(g.nick)}</b><small> / ${esc(g.name||'정보없음')}님</small></div><div class="contact">☎ 연락처 : ${esc(g.phone||'-')}<br>⌖ 주소 : ${esc((g.postalCode?g.postalCode+' ':'')+(g.address||'-'))}</div></div><table><thead><tr><th>품번</th><th>품명</th><th>옵션<br><small>(포장단위)</small></th><th>수량<br><small>(주문수량)</small></th><th>단가</th><th class="yellow">총 담아야 하는 수량<br><em>(작업 단위)</em></th></tr></thead><tbody>${rows}</tbody></table><div class="ss-total">📦 이 고객 총 담기 <strong>${totalWork}</strong> 작업 단위</div><div class="ss-bottom"><div><b>QR코드 스캔 후 작업 바랍니다</b><div class="safeqr"><img src="/qr_first.png" alt="QR"></div><small>핸드폰 카메라로 QR코드를 스캔해주세요!<br>(포장 완료 처리 및 상태 업데이트)</small></div><div class="labelbox"><b>🚚 고객님 송장 붙혀놓는 칸</b>${tracking?`<div class="tracking">송장번호 ${esc(tracking)}</div>`:''}<div>작업 후 박스에<br>송장 스티커 붙혀주세요</div></div></div><div class="ss-foot">♥ 오늘도 안전하고 빠른 배송을 위해 잘 포장해 주세요!</div></section>`;
+};
+window.openShippingDetailSafe=function(code){const g=shippingByCodeSafe(code);if(!g)return alert('택배리스트를 찾을 수 없습니다.');let m=$('shippingDetailSafeModal');if(!m){m=document.createElement('div');m.id='shippingDetailSafeModal';m.className='receipt-detail-modal';m.innerHTML='<div class="receipt-detail-box"><div class="receipt-detail-actions no-print"><button class="btn secondary" id="shipPrintSafeBtn">인쇄</button><button class="btn bad" id="shipCloseSafeBtn">닫기</button></div><div id="shipDetailSafeBody"></div></div>';document.body.appendChild(m)}m.classList.add('show');$('shipDetailSafeBody').innerHTML=shippingSheet(g,1,1);$('shipPrintSafeBtn').onclick=()=>openPrintWindow(shippingSheet(g,1,1),'택배리스트',false);$('shipCloseSafeBtn').onclick=()=>m.classList.remove('show')};
+
+const __oldRenderShippingSafe=window.renderShipping;
+window.renderShipping=function(){
+ const arr=shippingGroups(),box=$('shippingTable');if(!box)return;
+ const kim=arr.flatMap(g=>g.items.filter(isKimchi).map(x=>({g,x,p:packText(x)})));
+ let kimHtml='';if(kim.length){const sum=new Map();kim.forEach(({x,p})=>{const d=itemRowData(x),k=d.name+'|'+d.option+'|'+p.main.replace(/[0-9.]/g,''),n=Number(p.main.match(/[0-9.]+/)?.[0]||0);if(!sum.has(k))sum.set(k,{name:d.name,opt:d.option,unit:p.main.replace(/[0-9.]/g,''),qty:0});sum.get(k).qty+=n});kimHtml=`<div class="kimchi-safe card"><b>🥬 김치리스트 · 주문고객 ${new Set(kim.map(z=>z.g.nick)).size}명</b><div>${[...sum.values()].map(z=>`${esc(z.name)}${z.opt&&z.opt!=='-'?' ('+esc(z.opt)+')':''} <strong>${z.qty}${esc(z.unit)}</strong>`).join(' · ')}</div></div>`}
+ box.innerHTML=kimHtml+(arr.length?`<div class="scroll"><table class="shipping-safe"><thead><tr><th>선택</th><th>닉네임</th><th>실명</th><th>연락처</th><th>주소</th><th>판매자</th><th>송장번호</th><th>포장상태</th><th>상세</th></tr></thead><tbody>${arr.map(g=>`<tr><td><input class="safe-ship-check" type="checkbox" data-code="${esc(g.code)}"></td><td class="ship-nick"><b>${esc(g.nick)}</b></td><td>${esc(g.name||'정보없음')}</td><td>${esc(g.phone||'-')}</td><td>${esc((g.postalCode?g.postalCode+' ':'')+(g.address||'-'))}</td><td>${esc(g.seller||'')}</td><td><b>${esc(g.tracking||'-')}</b></td><td>${g.packed?'🟢 포장완료':'⏳ 포장대기'}</td><td><button class="btn secondary" onclick="openShippingDetailSafe('${esc(g.code)}')">택배리스트 보기</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">택배 대상이 없습니다.</div>');
+};
+
+// courier automation page must always contain its controls
+function ensureCourierPanelSafe(){const mount=$('courierMountV770');if(!mount)return;let panel=document.querySelector('.v723-courier-panel');if(panel&&panel.parentElement!==mount)mount.appendChild(panel);if(panel)panel.style.setProperty('display','block','important');if(!panel||!mount.contains(panel)){mount.innerHTML='<div class="card"><div class="empty">택배사 설정 화면을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요.</div></div>'}}
+const __oldMountStandaloneSafe=mountStandalone;mountStandalone=function(){__oldMountStandaloneSafe();ensureCourierPanelSafe()};
+
+// stronger visual reset so table body never becomes black/invisible
+(function addTargetedStyle(){const st=document.createElement('style');st.id='safeTargetedFixStyle';st.textContent=`
+.safe-receipt tbody td,.safe-ship-sheet tbody td{background:#fff!important;color:#111!important}
+.safe-receipt tbody tr,.safe-ship-sheet tbody tr{background:#fff!important}
+.safe-receipt .who,.safe-ship-sheet .who{display:flex!important;align-items:center!important;gap:6px!important;flex-wrap:wrap!important}
+.safe-receipt .who>b,.safe-ship-sheet .who>b{font-size:32px!important;color:#111!important}
+.safe-receipt .who small,.safe-ship-sheet .who small{font-size:16px!important;color:#333!important}
+.shipping-safe .ship-nick b{font-size:20px!important}
+#courierauto .v723-courier-panel{display:block!important}
+.safeqr img{display:block!important;width:125px!important;height:125px!important;margin:8px auto!important}
+@media print{.safe-receipt,.safe-ship-sheet,.safe-summary-sheet{display:block!important;visibility:visible!important;background:#fff!important;color:#111!important}.safe-receipt *, .safe-ship-sheet *, .safe-summary-sheet *{visibility:visible!important}}
+`;document.head.appendChild(st)})();
+
+
 })();
