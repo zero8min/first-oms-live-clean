@@ -526,3 +526,97 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
     setTimeout(()=>{ try{ lastSavedJson=JSON.stringify(state); }catch(e){} },3000);
   }catch(e){}
 })();
+
+/* ===== 2026-09-04 FINAL DATA/SYNC PATCH =====
+   Data/reconciliation/messaging/new-customer workflow only.
+   Receipt and shipping sheet HTML/CSS are intentionally untouched. */
+(function(){
+  const FKEY='firstOmsReceiptSelectionV20260904';
+  const $f=id=>document.getElementById(id);
+  const clone=v=>JSON.parse(JSON.stringify(v));
+  const nrm=v=>String(v??'').normalize('NFKC').toLowerCase().replace(/님$/,'').replace(/[\s\-_.()[\]{}]/g,'');
+  const amt=v=>{const n=Number(String(v??'').replace(/[^0-9.-]/g,''));return Number.isFinite(n)?Math.round(n):0};
+
+  // 1) Whole-state backup: never customer-only. Export the exact in-memory OMS state.
+  window.downloadBackup=async function(){
+    const payload={version:7.7,backupType:'FULL_OMS_STATE',exportedAt:new Date().toISOString(),tenantCode:window.__tenantCode||'FIRST-0001',state:clone(window.state||state)};
+    const required=['orders','customers','payments','settings','paymentOverrides','shippingScans','shippingOmissions','packingRules','savedSnapshots'];
+    payload.manifest=Object.fromEntries(required.map(k=>[k,Array.isArray(payload.state?.[k])?payload.state[k].length:(payload.state?.[k]&&typeof payload.state[k]==='object'?Object.keys(payload.state[k]).length:0)]));
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download='FIRST_OMS_전체백업_'+new Date().toISOString().slice(0,10)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  };
+
+  // 2/3/9) Strict reconciliation. No fuzzy/substring auto-paid. Manual overrides are revalidated after charge changes.
+  function aliases(r){const c=r.customer||{};return [...new Set([r.nick,c.nick,c.nickname,c.name].map(nrm).filter(Boolean))]}
+  function strictPaymentFor(r,payments,used){
+    const total=amt(r.total), as=aliases(r);
+    const named=payments.map((p,i)=>({p,i,a:amt(p.amount),name:nrm(p.payer||p.name||p.depositor)})).filter(z=>!used.has(z.i)&&z.name&&as.includes(z.name));
+    const exact=named.filter(z=>z.a===total);
+    if(exact.length===1){used.add(exact[0].i);return {status:'paid',payment:exact[0].p,paidAmount:exact[0].a,verified:true,reason:'입금자명과 청구금액 정확일치'}}
+    if(exact.length>1)return {status:'review',payment:exact[0].p,paidAmount:exact[0].a,verified:false,reason:'동일 이름·동일 금액 입금이 여러 건이라 확인 필요'};
+    if(named.length){const sum=named.reduce((s,z)=>s+z.a,0);if(sum===total&&named.length>1){named.forEach(z=>used.add(z.i));return {status:'paid',payment:named[0].p,payments:named.map(z=>z.p),paidAmount:sum,verified:true,reason:'동일 입금자 분할입금 합계 정확일치'}}return {status:'amount-mismatch',payment:named[0].p,payments:named.map(z=>z.p),paidAmount:sum,verified:false,reason:`청구 ${total.toLocaleString()}원 / 실제입금 ${sum.toLocaleString()}원`}}
+    return {status:'unpaid',verified:false,paidAmount:0,reason:'정확히 연결되는 입금내역 없음'};
+  }
+  const oldGet=window.getReceipts;
+  if(typeof oldGet==='function') window.getReceipts=function(){
+    const rs=oldGet().map(r=>{try{const m=findCustomerSafe(r.nick);if(m?.customer){r.customer=m.customer;r.customerId=m.customer.id;r.matchStatus=m.status}}catch(e){}return r});
+    const used=new Set(),payments=state.payments||[];
+    rs.forEach(r=>{
+      const calc=strictPaymentFor(r,payments,used),ov=state.paymentOverrides?.[r.key];
+      // A manual paid flag is not allowed to survive a changed invoice unless its recorded payment still equals the new total.
+      if(ov?.status==='paid'&&ov.payment&&amt(ov.payment.amount)===amt(r.total)&&aliases(r).includes(nrm(ov.payment.payer||ov.payment.name||ov.payment.depositor))){r.payment={...calc,status:'paid',payment:ov.payment,paidAmount:amt(ov.payment.amount),verified:true,manual:true,reason:'수기확인값 재검증 완료'}}
+      else r.payment=calc;
+    });
+    return rs;
+  };
+
+  // 2/6) Every settlement message includes account details even if the saved template omitted placeholders.
+  const oldFmt=window.formatSms;
+  window.formatSms=function(r){
+    let t=typeof oldFmt==='function'?String(oldFmt(r)||''):'';const s=state.settings||{};
+    const account=`입금계좌: ${s.bank||'카카오뱅크'} ${s.account||'계좌번호 미설정'} 예금주 ${s.holder||'김미숙'}`;
+    if(!nrm(t).includes(nrm(s.account||'계좌번호미설정'))) t=(t.trim()?t.trim()+'\n\n':'')+account;
+    return t;
+  };
+
+  // 4/7/10) Explicit save writes the COMPLETE state to server, then verifies by reading it back.
+  async function saveWholeState(date){
+    if(date){const snap=clone(state);delete snap.savedSnapshots;state.savedSnapshots=state.savedSnapshots||{};state.savedSnapshots[date]=snap;state.lastSavedDate=date}
+    const body=JSON.stringify(state);localStorage.setItem(KEY,body);
+    const r=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    if(!r.ok)throw new Error('서버 저장 HTTP '+r.status);
+    const check=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});if(!check.ok)throw new Error('저장 확인 HTTP '+check.status);
+    const got=await check.json(),sv=got.state||got;
+    const sig=x=>JSON.stringify([x?.orders?.length||0,x?.customers?.length||0,x?.payments?.length||0,Object.keys(x?.paymentOverrides||{}).length,Object.keys(x?.shippingScans||{}).length,x?.updatedAt||'']);
+    if((sv?.orders?.length||0)!==(state.orders?.length||0)||(sv?.customers?.length||0)!==(state.customers?.length||0)||(sv?.payments?.length||0)!==(state.payments?.length||0))throw new Error('서버 저장 확인값이 현재 화면과 다릅니다. 다시 저장해 주세요.');
+    return sig(sv);
+  }
+  window.commitDatedSaveSafe=async function(date){try{await saveWholeState(date);alert(date.replace(/-/g,'.')+' 전체 정보를 서버에 저장했고 재확인했습니다. 다른 컴퓨터에서도 같은 서버 저장본을 불러옵니다.')}catch(e){alert('서버 저장 실패: '+e.message)}};
+
+  // Server is authoritative on another computer/login. Load complete state, not only customers.
+  async function loadAuthoritativeState(){
+    try{const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});if(!r.ok)return;const d=await r.json(),sv=d.state||d;if(!sv||!Array.isArray(sv.customers))return;
+      const meaningful=(sv.orders?.length||sv.payments?.length||Object.keys(sv.savedSnapshots||{}).length||0)>0;if(!meaningful)return;
+      state={...state,...sv,settings:{...(state.settings||{}),...(sv.settings||{})}};window.state=state;localStorage.setItem(KEY,JSON.stringify(state));try{autoMatchAll()}catch(e){};try{renderAll()}catch(e){}
+    }catch(e){console.warn('전체 서버상태 동기화 실패',e)}
+  }
+  window.addEventListener('load',()=>setTimeout(loadAuthoritativeState,500));
+
+  // 5) Persist settlement checkbox selection independently of search text.
+  let selected=new Set();try{selected=new Set(JSON.parse(localStorage.getItem(FKEY)||'[]'))}catch(e){}
+  document.addEventListener('change',e=>{const cb=e.target;if(!cb?.matches?.('.v7474-receipt-check,.v747-receipt-check'))return;const key=cb.dataset.key;if(!key)return;cb.checked?selected.add(key):selected.delete(key);localStorage.setItem(FKEY,JSON.stringify([...selected]))},true);
+  const mo=new MutationObserver(()=>document.querySelectorAll('.v7474-receipt-check,.v747-receipt-check').forEach(cb=>{if(cb.dataset.key&&selected.has(cb.dataset.key))cb.checked=true}));
+  window.addEventListener('load',()=>{const box=$f('receiptCards');if(box)mo.observe(box,{childList:true,subtree:true})});
+
+  // 6) Settlement-room pre-broadcast message box using existing selected customer SMS sender when available.
+  function mountSettlementBroadcast(){const sec=$f('receipts');if(!sec||$f('settlementBroadcastFinal'))return;const tools=sec.querySelector('.receipt-tools');const box=document.createElement('div');box.id='settlementBroadcastFinal';box.className='card no-print';box.style.margin='12px 0';box.innerHTML='<div class="section-title" style="margin-top:0"><h3>정산실 방송 전 문자</h3></div><textarea id="settlementBroadcastText" rows="4" placeholder="방송 전 안내, 입금계좌 등을 입력하세요."></textarea><div class="actions" style="margin-top:8px"><button class="btn" id="settlementBroadcastSend">체크 고객에게 전송</button></div><div class="muted">정산서에서 체크한 고객에게 전송합니다. {계좌번호} {은행} {예금주} 사용 가능</div>';tools?.after(box);
+    $f('settlementBroadcastSend').onclick=async function(){const keys=[...selected],rs=getReceipts().filter(r=>keys.includes(r.key));if(!rs.length)return alert('정산서에서 받을 고객을 먼저 체크해 주세요.');let text=$f('settlementBroadcastText').value||'';const s=state.settings||{};text=text.replaceAll('{계좌번호}',s.account||'').replaceAll('{은행}',s.bank||'').replaceAll('{예금주}',s.holder||'');if(!text.trim())return alert('문자 내용을 입력해 주세요.');this.disabled=true;let ok=0,fail=0;for(const r of rs){const to=r.customer?.phone;if(!to){fail++;continue}try{const x=await fetch('/api/mms/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to,text,subject:'땡라이브 안내',date:r.date,nickname:r.nick,name:r.customer?.name||'',total:r.total})});if(x.ok)ok++;else fail++}catch(e){fail++}}this.disabled=false;alert(fail?`전송완료 ${ok}명 · 확인필요 ${fail}명`:`${ok}명 전송 완료`)};
+  }
+
+  // New/unregistered customers collected separately for quick entry.
+  function mountNewCustomers(){const sec=$f('customers');if(!sec||$f('newCustomerFinal'))return;const box=document.createElement('div');box.id='newCustomerFinal';box.className='card no-print';box.style.margin='12px 0';sec.querySelector('.section-title')?.after(box);renderNewCustomers()}
+  window.renderNewCustomers=renderNewCustomers;
+  function renderNewCustomers(){const box=$f('newCustomerFinal');if(!box)return;const known=new Set((state.customers||[]).filter(c=>c.active!==false).flatMap(c=>[c.nick,c.nickname,c.name].map(nrm)));const nicks=[...new Set((state.orders||[]).map(o=>String(o.nick||'').trim()).filter(Boolean))].filter(x=>!known.has(nrm(x))).sort();box.innerHTML=`<div class="section-title" style="margin-top:0"><h3>신규 고객 정보입력</h3><span class="muted">미등록 ${nicks.length}명</span></div>${nicks.length?'<div class="actions" style="gap:6px;flex-wrap:wrap">'+nicks.map(x=>`<button class="btn secondary new-customer-final" data-nick="${String(x).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}">${String(x).replace(/</g,'&lt;')}</button>`).join('')+'</div>':'<div class="muted">현재 판매리스트의 신규 미등록 고객이 없습니다.</div>'}`;box.querySelectorAll('.new-customer-final').forEach(b=>b.onclick=()=>{openCustomerModal();setTimeout(()=>{if($f('cNick'))$f('cNick').value=b.dataset.nick||'';if($f('cName')&&!$f('cName').value)$f('cName').focus()},0)})}
+
+  window.addEventListener('load',()=>setTimeout(()=>{mountSettlementBroadcast();mountNewCustomers()},800));
+})();
