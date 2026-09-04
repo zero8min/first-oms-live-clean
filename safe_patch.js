@@ -664,10 +664,29 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
     return recoveryCustomers;
   }
 
-  function putRecoveryOnScreen(){
+  function mergeCustomerLists(){
+    const lists=[...arguments].filter(Array.isArray);
+    const out=[], seenId=new Set(), seenLoose=new Set();
+    for(const list of lists){
+      for(const raw of list){
+        if(!raw)continue;
+        const c={...raw,nickname:raw.nickname||raw.nick||'',nick:raw.nick||raw.nickname||''};
+        const id=String(c.id||'');
+        const lk=looseKey(c);
+        if((id&&seenId.has(id))||(lk&&seenLoose.has(lk)))continue;
+        out.push(c);
+        if(id)seenId.add(id);
+        if(lk)seenLoose.add(lk);
+      }
+    }
+    return out;
+  }
+
+  function putRecoveryOnScreen(extraCustomers){
     if(!recoveryCustomers)return;
     try{
-      state.customers=clone(recoveryCustomers).map(c=>({...c,nickname:c.nickname||c.nick||'',nick:c.nick||c.nickname||''}));
+      // 400명 백업은 최소 기준으로만 유지하고, 이후 신규 등록 고객은 절대 덮어쓰지 않는다.
+      state.customers=mergeCustomerLists(recoveryCustomers,extraCustomers,state.customers);
       window.state=state;
       ensureAccountSettings();
       try{autoMatchAll()}catch(e){}
@@ -693,16 +712,12 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
           if(!resp.ok)console.warn('고객 복구 저장 실패',c?.nickname||c?.name,resp.status);
         }catch(e){console.warn('고객 복구 저장 오류',c?.nickname||c?.name,e)}
       }
-      // Save the exact 400-customer state as well, without touching orders/payments/shipping.
-      try{
-        state.customers=clone(recoveryCustomers);
-        ensureAccountSettings();
-        await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
-      }catch(e){console.warn('전체상태 고객복구 저장 실패',e)}
+      // 고객DB는 /api/customers만 기준으로 복구한다. /api/state에 400명을 다시 덮어써서
+      // 방금 등록한 신규 고객이 사라지는 동작은 하지 않는다.
       const vr=await fetch('/api/customers?ts='+Date.now(),{cache:'no-store'});
       const verified=vr.ok?await vr.json():[];
-      console.info('[FIRST OMS] 고객복구 확인',Array.isArray(verified)?verified.length:0,'명 / 백업 400명');
-      putRecoveryOnScreen();
+      console.info('[FIRST OMS] 고객복구 확인',Array.isArray(verified)?verified.length:0,'명 / 백업 최소 400명');
+      putRecoveryOnScreen(verified);
     }catch(e){console.warn('400명 고객복구 실패',e);putRecoveryOnScreen()}
     finally{restoreRunning=false}
   }
@@ -722,7 +737,8 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
         state.customers=(Array.isArray(list)?list:[]).map(c=>({...c,nickname:c.nickname||c.nick||'',nick:c.nick||c.nickname||''}));
         window.state=state;ensureAccountSettings();try{autoMatchAll()}catch(e){};try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){};try{renderCustomers()}catch(e){}
       }else{
-        putRecoveryOnScreen();
+        // 서버가 아직 400명 기준에 못 미쳐도 서버에 새로 등록된 고객은 화면에 즉시 합친다.
+        putRecoveryOnScreen(list);
         setTimeout(restoreMissingCustomers,50);
       }
       if(showMessage)alert(`고객DB ${state.customers?.length||0}명을 확인했습니다.`);
