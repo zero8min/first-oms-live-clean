@@ -620,3 +620,42 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
 
   window.addEventListener('load',()=>setTimeout(()=>{mountSettlementBroadcast();mountNewCustomers()},800));
 })();
+
+
+/* ===== 2026-09-04 CUSTOMER 400 + ACCOUNT DISPLAY RECOVERY =====
+   Focused patch only: restore the supplied 400-customer backup when the server has fewer,
+   preserve every other state field, and ensure the known saved settlement account is present. */
+(function(){
+  const RECOVERY_ACCOUNT={bank:'카카오뱅크',account:'3333-06-9851290',holder:'김미숙'};
+  function ensureAccount(){
+    state.settings=state.settings||{};
+    if(!String(state.settings.bank||'').trim()) state.settings.bank=RECOVERY_ACCOUNT.bank;
+    if(!String(state.settings.account||'').trim()) state.settings.account=RECOVERY_ACCOUNT.account;
+    if(!String(state.settings.holder||'').trim()) state.settings.holder=RECOVERY_ACCOUNT.holder;
+    window.state=state;
+  }
+  async function recoverCustomers400(){
+    try{
+      ensureAccount();
+      const current=Array.isArray(state.customers)?state.customers:[];
+      if(current.length>=400){ localStorage.setItem(KEY,JSON.stringify(state)); return; }
+      const r=await fetch('/customer_recovery_20260904.json?ts='+Date.now(),{cache:'no-store'});
+      if(!r.ok) throw new Error('고객복구 파일 HTTP '+r.status);
+      const d=await r.json();
+      if(!Array.isArray(d.customers)||d.customers.length!==400) throw new Error('고객복구 파일 400명 확인 실패');
+      // Replace only the customer collection with the exact user-supplied 2026-09-04 400-person backup.
+      // Orders/payments/shipping/settings/snapshots and every other field stay untouched.
+      state.customers=JSON.parse(JSON.stringify(d.customers));
+      ensureAccount();
+      state.updatedAt=new Date().toISOString();
+      window.state=state;
+      localStorage.setItem(KEY,JSON.stringify(state));
+      const save=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
+      if(!save.ok) throw new Error('400명 서버저장 HTTP '+save.status);
+      try{autoMatchAll()}catch(e){} try{renderAll()}catch(e){}
+      console.info('[FIRST OMS] 2026-09-04 고객 400명 복구 및 계좌정보 보강 완료');
+    }catch(e){ console.warn('[FIRST OMS] 고객 400명 복구 확인 필요:',e); }
+  }
+  // Run after the normal authoritative server-state loader settles.
+  window.addEventListener('load',()=>setTimeout(recoverCustomers400,1800));
+})();
