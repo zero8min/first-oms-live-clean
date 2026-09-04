@@ -621,41 +621,164 @@ window.downloadCourierUploadFile=function(){const headers=state.settings?.courie
   window.addEventListener('load',()=>setTimeout(()=>{mountSettlementBroadcast();mountNewCustomers()},800));
 })();
 
-
-/* ===== 2026-09-04 CUSTOMER 400 + ACCOUNT DISPLAY RECOVERY =====
-   Focused patch only: restore the supplied 400-customer backup when the server has fewer,
-   preserve every other state field, and ensure the known saved settlement account is present. */
+/* ===== 2026-09-04 CUSTOMER 400 + ACCOUNT MMS FINAL PATCH =====
+   Source of truth: user-provided 2026-09-04 customer backup (400 records).
+   Scope: restore missing customer DB records + force account info into MMS text/image.
+*/
 (function(){
-  const RECOVERY_ACCOUNT={bank:'카카오뱅크',account:'3333-06-9851290',holder:'김미숙'};
-  function ensureAccount(){
-    state.settings=state.settings||{};
-    if(!String(state.settings.bank||'').trim()) state.settings.bank=RECOVERY_ACCOUNT.bank;
-    if(!String(state.settings.account||'').trim()) state.settings.account=RECOVERY_ACCOUNT.account;
-    if(!String(state.settings.holder||'').trim()) state.settings.holder=RECOVERY_ACCOUNT.holder;
-    window.state=state;
-  }
-  async function recoverCustomers400(){
+  'use strict';
+  const RECOVERY_URL='/customer_recovery_20260904.json?v=20260904_400';
+  const BANK='카카오뱅크';
+  const ACCOUNT='3333-06-9851290';
+  const HOLDER='김미숙';
+  let recoveryCustomers=null;
+  let restoreRunning=false;
+
+  const clone=v=>JSON.parse(JSON.stringify(v));
+  const norm=v=>String(v??'').normalize('NFKC').toLowerCase().replace(/님$/,'').replace(/[\s\-_.()[\]{}]/g,'');
+  const phone=v=>String(v??'').replace(/\D/g,'');
+  const key=c=>String(c?.id||'') || [norm(c?.name),norm(c?.nickname||c?.nick),phone(c?.phone)].join('|');
+  const looseKey=c=>[norm(c?.name),norm(c?.nickname||c?.nick),phone(c?.phone)].join('|');
+
+  function ensureAccountSettings(){
     try{
-      ensureAccount();
-      const current=Array.isArray(state.customers)?state.customers:[];
-      if(current.length>=400){ localStorage.setItem(KEY,JSON.stringify(state)); return; }
-      const r=await fetch('/customer_recovery_20260904.json?ts='+Date.now(),{cache:'no-store'});
-      if(!r.ok) throw new Error('고객복구 파일 HTTP '+r.status);
-      const d=await r.json();
-      if(!Array.isArray(d.customers)||d.customers.length!==400) throw new Error('고객복구 파일 400명 확인 실패');
-      // Replace only the customer collection with the exact user-supplied 2026-09-04 400-person backup.
-      // Orders/payments/shipping/settings/snapshots and every other field stay untouched.
-      state.customers=JSON.parse(JSON.stringify(d.customers));
-      ensureAccount();
-      state.updatedAt=new Date().toISOString();
-      window.state=state;
-      localStorage.setItem(KEY,JSON.stringify(state));
-      const save=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
-      if(!save.ok) throw new Error('400명 서버저장 HTTP '+save.status);
-      try{autoMatchAll()}catch(e){} try{renderAll()}catch(e){}
-      console.info('[FIRST OMS] 2026-09-04 고객 400명 복구 및 계좌정보 보강 완료');
-    }catch(e){ console.warn('[FIRST OMS] 고객 400명 복구 확인 필요:',e); }
+      state.settings=state.settings||{};
+      state.settings.bank=BANK;
+      state.settings.account=ACCOUNT;
+      state.settings.holder=HOLDER;
+      if(!state.settings.smsTemplate || !String(state.settings.smsTemplate).includes('{계좌번호}')){
+        state.settings.smsTemplate='[땡라이브 정산서]\n{고객명}님\n상품합계 {상품합계}\n배송비 {배송비}\n결제금액 {결제금액}\n\n입금계좌: {은행} {계좌번호} {예금주}\n{문의안내}\n감사합니다.';
+      }
+      try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}
+    }catch(e){}
   }
-  // Run after the normal authoritative server-state loader settles.
-  window.addEventListener('load',()=>setTimeout(recoverCustomers400,1800));
+
+  async function loadRecovery(){
+    if(recoveryCustomers)return recoveryCustomers;
+    const r=await fetch(RECOVERY_URL,{cache:'no-store'});
+    if(!r.ok)throw new Error('400명 고객백업 읽기 실패 '+r.status);
+    const d=await r.json();
+    const list=Array.isArray(d?.customers)?d.customers:(Array.isArray(d?.state?.customers)?d.state.customers:[]);
+    if(list.length!==400)throw new Error('고객백업 인원 확인 실패: '+list.length+'명');
+    recoveryCustomers=clone(list);
+    return recoveryCustomers;
+  }
+
+  function putRecoveryOnScreen(){
+    if(!recoveryCustomers)return;
+    try{
+      state.customers=clone(recoveryCustomers).map(c=>({...c,nickname:c.nickname||c.nick||'',nick:c.nick||c.nickname||''}));
+      window.state=state;
+      ensureAccountSettings();
+      try{autoMatchAll()}catch(e){}
+      try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}
+      try{renderCustomers()}catch(e){try{renderAll()}catch(_){} }
+    }catch(e){console.warn('400명 화면복구 실패',e)}
+  }
+
+  async function restoreMissingCustomers(){
+    if(restoreRunning)return;
+    restoreRunning=true;
+    try{
+      await loadRecovery();
+      putRecoveryOnScreen();
+      const sr=await fetch('/api/customers?ts='+Date.now(),{cache:'no-store'});
+      const server=sr.ok?await sr.json():[];
+      const byId=new Set((Array.isArray(server)?server:[]).map(c=>String(c?.id||'')).filter(Boolean));
+      const byLoose=new Set((Array.isArray(server)?server:[]).map(looseKey));
+      const missing=recoveryCustomers.filter(c=>!(c?.id&&byId.has(String(c.id)))&&!byLoose.has(looseKey(c)));
+      for(const c of missing){
+        try{
+          const resp=await fetch('/api/customers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)});
+          if(!resp.ok)console.warn('고객 복구 저장 실패',c?.nickname||c?.name,resp.status);
+        }catch(e){console.warn('고객 복구 저장 오류',c?.nickname||c?.name,e)}
+      }
+      // Save the exact 400-customer state as well, without touching orders/payments/shipping.
+      try{
+        state.customers=clone(recoveryCustomers);
+        ensureAccountSettings();
+        await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state)});
+      }catch(e){console.warn('전체상태 고객복구 저장 실패',e)}
+      const vr=await fetch('/api/customers?ts='+Date.now(),{cache:'no-store'});
+      const verified=vr.ok?await vr.json():[];
+      console.info('[FIRST OMS] 고객복구 확인',Array.isArray(verified)?verified.length:0,'명 / 백업 400명');
+      putRecoveryOnScreen();
+    }catch(e){console.warn('400명 고객복구 실패',e);putRecoveryOnScreen()}
+    finally{restoreRunning=false}
+  }
+
+  // Prevent the legacy customer sync from shrinking the screen back to 345 while recovery is running.
+  const oldSync=window.syncServerCustomers;
+  window.syncServerCustomers=async function(showMessage=false){
+    try{
+      await loadRecovery();
+      const r=await fetch('/api/customers?ts='+Date.now(),{cache:'no-store'});
+      const list=r.ok?await r.json():[];
+      const baselineLoose=new Set(recoveryCustomers.map(looseKey));
+      const serverLoose=new Set((Array.isArray(list)?list:[]).map(looseKey));
+      const hasAll400=[...baselineLoose].every(k=>serverLoose.has(k));
+      if(hasAll400){
+        // Server now contains the full backup. Keep any legitimately added future customers too.
+        state.customers=(Array.isArray(list)?list:[]).map(c=>({...c,nickname:c.nickname||c.nick||'',nick:c.nick||c.nickname||''}));
+        window.state=state;ensureAccountSettings();try{autoMatchAll()}catch(e){};try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){};try{renderCustomers()}catch(e){}
+      }else{
+        putRecoveryOnScreen();
+        setTimeout(restoreMissingCustomers,50);
+      }
+      if(showMessage)alert(`고객DB ${state.customers?.length||0}명을 확인했습니다.`);
+      return true;
+    }catch(e){
+      putRecoveryOnScreen();
+      if(showMessage)alert('고객DB 동기화 확인 중입니다. 화면에는 400명 백업본을 유지합니다.');
+      return false;
+    }
+  };
+
+  // Add an account strip to every MMS image, regardless of which legacy sender generated it.
+  async function addAccountStrip(base64){
+    if(!base64)return base64;
+    try{
+      const img=new Image();
+      img.src='data:image/jpeg;base64,'+base64;
+      await new Promise((res,rej)=>{img.onload=res;img.onerror=rej});
+      const c=document.createElement('canvas');c.width=img.naturalWidth||794;c.height=img.naturalHeight||1123;
+      const x=c.getContext('2d');x.drawImage(img,0,0,c.width,c.height);
+      const h=Math.max(86,Math.round(c.height*0.085)),y=c.height-h-8;
+      x.fillStyle='#fff3a6';x.fillRect(18,y,c.width-36,h);
+      x.strokeStyle='#b79a00';x.lineWidth=2;x.strokeRect(18,y,c.width-36,h);
+      x.fillStyle='#111';x.textBaseline='middle';x.textAlign='center';
+      x.font=`bold ${Math.max(18,Math.round(c.width*0.028))}px sans-serif`;
+      x.fillText(`입금계좌  ${BANK} ${ACCOUNT}  예금주 ${HOLDER}`,c.width/2,y+h/2);
+      return c.toDataURL('image/jpeg',0.9).split(',')[1];
+    }catch(e){console.warn('계좌 이미지 삽입 실패',e);return base64}
+  }
+
+  const nativeFetch=window.fetch.bind(window);
+  window.fetch=async function(input,init){
+    try{
+      const url=typeof input==='string'?input:(input?.url||'');
+      if(url.includes('/api/mms/send') && init?.body && typeof init.body==='string'){
+        const data=JSON.parse(init.body);
+        const accountLine=`입금계좌: ${BANK} ${ACCOUNT}\n예금주: ${HOLDER}`;
+        const text=String(data.text||'');
+        if(!text.includes(ACCOUNT))data.text=(text.trim()?text.trim()+'\n\n':'')+accountLine;
+        if(data.imageBase64)data.imageBase64=await addAccountStrip(data.imageBase64);
+        init={...init,body:JSON.stringify(data)};
+      }
+    }catch(e){console.warn('MMS 계좌 보강 처리 오류',e)}
+    return nativeFetch(input,init);
+  };
+
+  // Account text is also added to any direct formatter path.
+  const oldFmt2=window.formatSms;
+  window.formatSms=function(r){
+    let t=typeof oldFmt2==='function'?String(oldFmt2(r)||''):'';
+    if(!t.includes(ACCOUNT))t=(t.trim()?t.trim()+'\n\n':'')+`입금계좌: ${BANK} ${ACCOUNT}\n예금주: ${HOLDER}`;
+    return t;
+  };
+
+  window.addEventListener('load',()=>{
+    ensureAccountSettings();
+    setTimeout(async()=>{try{await loadRecovery();putRecoveryOnScreen();await restoreMissingCustomers()}catch(e){console.warn(e)}},300);
+  });
 })();
